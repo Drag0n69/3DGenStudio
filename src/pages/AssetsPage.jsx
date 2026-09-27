@@ -210,6 +210,7 @@ function getChildNoun(type) {
 // (the page has always listed roots), but a batch export often wants exactly
 // the children: every mesh->mesh Batch stage saves a VERSION of its input.
 const CHILD_VIEWS = ['roots', 'all', 'children']
+const SEARCH_CHILDREN_KEY = 'assetsPage:searchChildren'
 
 // A child as a grid entry of its own, shaped like a root so the filters, the
 // card and the selection treat both alike. The server always attaches a
@@ -491,6 +492,24 @@ export default function AssetsPage() {
   const [tagEditorSaving, setTagEditorSaving] = useState(false)
   const [tagEditorError, setTagEditorError] = useState('')
   const [childView, setChildView] = useState('roots')
+  // Remembered per browser: it is a working habit, not a per-visit filter.
+  const [searchChildren, setSearchChildren] = useState(() => {
+    try {
+      return localStorage.getItem(SEARCH_CHILDREN_KEY) !== 'false'
+    } catch {
+      return true
+    }
+  })
+  const toggleSearchChildren = () => {
+    setSearchChildren(prev => {
+      try {
+        localStorage.setItem(SEARCH_CHILDREN_KEY, String(!prev))
+      } catch {
+        // Storage can be unavailable (private window); the toggle still works.
+      }
+      return !prev
+    })
+  }
   // Batch export selection: selection key -> true. Page-independent, so it
   // survives paging, filtering and switching section — images and meshes can
   // go out in one export.
@@ -631,16 +650,23 @@ export default function AssetsPage() {
   )
   const sectionHasChildren = sectionRoots.some(asset => getAssetChildren(asset).length > 0)
   const effectiveChildView = sectionHasChildren ? childView : 'roots'
+  // "Originals only" still finds a version or edit by name while a search is
+  // typed: a version is usually what is being looked for (a Batch stage names
+  // its result after the stage, not after the mesh), and switching the whole
+  // grid to versions just to search one is a detour.
+  const searchIncludesChildMatches = effectiveChildView === 'roots' && searchChildren && Boolean(normalizedSearch)
   // Each child is listed right after its root, so "Originals + versions" reads
   // as families rather than as two interleaved lists.
   const sectionAssets = useMemo(() => {
-    if (effectiveChildView === 'roots') return sectionRoots
+    if (effectiveChildView === 'roots' && !searchIncludesChildMatches) return sectionRoots
     return sectionRoots.flatMap(root => {
       const children = getAssetChildren(root).map((child, index) => toChildEntry(root, child, index))
       return effectiveChildView === 'children' ? children : [root, ...children]
     })
-  }, [sectionRoots, effectiveChildView])
+  }, [sectionRoots, effectiveChildView, searchIncludesChildMatches])
   const childNoun = activeSection === 'images' || activeSection === 'brushes' ? 'edits' : 'versions'
+  // Whether the header search reaches versions/edits at all, for its placeholder.
+  const searchReachesChildren = sectionHasChildren && (effectiveChildView !== 'roots' || searchChildren)
 
   // An asset can be linked to multiple projects, so resolve every project key it
   // belongs to (falling back to the single projectId, then "Unassigned").
@@ -718,7 +744,9 @@ export default function AssetsPage() {
     : sectionAssets.filter(asset => (
       // A version found by its root's name too: batch results are often named
       // after the stage, which says nothing about which mesh they came from.
-      (matchesSearch(asset.name) || (asset.isChild && matchesSearch(asset.parentName)))
+      // Not when the children are only there as search hits: every version of
+      // a matching root would match through its parent and flood the results.
+      (matchesSearch(asset.name) || (asset.isChild && !searchIncludesChildMatches && matchesSearch(asset.parentName)))
       && matchesProjectFilter(asset)
       && matchesTagFilter(asset)
     ))
@@ -1867,7 +1895,7 @@ export default function AssetsPage() {
         onSettingsClick={() => setShowSettings(true)}
         searchValue={searchQuery}
         onSearchChange={setSearchQuery}
-        searchPlaceholder={`Search ${activeConfig.label}`}
+        searchPlaceholder={`Search ${activeConfig.label}${searchReachesChildren ? ` + ${childNoun}` : ''}`}
       />
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
@@ -2584,6 +2612,22 @@ export default function AssetsPage() {
                               <option value="children">{childNoun[0].toUpperCase() + childNoun.slice(1)} only</option>
                             </select>
                           </label>
+                        )}
+                        {/* Only matters under "Originals only": the other two
+                            views already list, and so already search, them. */}
+                        {sectionHasChildren && effectiveChildView === 'roots' && (
+                          <button
+                            type="button"
+                            className={`assets-group-toggle ${searchChildren ? 'assets-group-toggle--active' : ''}`}
+                            onClick={toggleSearchChildren}
+                            title={searchChildren
+                              ? `The search also returns ${childNoun} whose name matches, as cards of their own`
+                              : `The search only looks at originals`}
+                            aria-pressed={searchChildren}
+                          >
+                            <span className="material-symbols-outlined">manage_search</span>
+                            <span>Search {childNoun}</span>
+                          </button>
                         )}
                         {tagFilterOptions.length > 0 && (
                           <TagFilter
