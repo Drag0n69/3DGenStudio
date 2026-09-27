@@ -875,7 +875,8 @@
 				{ "Node": "214",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
 				{ "Node": "258",  "Input": "to_resolution",  "Name": "Cascade Resolution",   "Type": "Number", "Enums":[1024,1536] },
 				{ "Node": "39",  "Input": "backend",  "Name": "Backend",   "Type": "String", "Enums":["flash_attn","sdpa"] },
-				{ "Node": "260",  "Input": "value",  "Name": "Fill Holes",   "Type": "Boolean" }
+				{ "Node": "260",  "Input": "value",  "Name": "Fill Holes",   "Type": "Boolean" },
+				{ "Node": "265",  "Input": "resolution",  "Name": "UV Size",   "Type": "Number" }
 			],
 			"Outputs": [
 				{ "Node": "266", "Name": "Save Mesh", "Type": "Mesh" }
@@ -1007,7 +1008,8 @@
 			"Inputs": [
 				{ "Node": "1", "Input": "image",  "Name": "Source Image", "Type": "Image" },
 				{ "Node": "27",  "Input": "max_facenum",  "Name": "Target Face Number",   "Type": "Number" },
-				{ "Node": "5",  "Input": "seed",  "Name": "Seed",   "Type": "Number" }
+				{ "Node": "5",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
+				{ "Node": "88",  "Input": "resolution",  "Name": "UV Size",   "Type": "Number" }
 			],
 			"Outputs": [
 				{ "Node": "90", "Name": "Save Mesh", "Type": "Mesh" }
