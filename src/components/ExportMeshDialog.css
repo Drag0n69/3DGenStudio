@@ -438,3 +438,76 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* ── Batch export: one row per selected asset ─────────────────────────────── */
+
+.export-mesh__items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 280px;
+  margin: 0;
+  padding: 0.35rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  border: 1px solid rgba(71, 72, 74, 0.24);
+  border-radius: var(--radius-md);
+  background: rgba(18, 19, 21, 0.88);
+}
+
+.export-mesh__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.5rem;
+  align-items: center;
+  padding: 0.3rem 0.45rem;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.78rem;
+}
+
+.export-mesh__item--running {
+  background: rgba(143, 245, 255, 0.07);
+}
+
+.export-mesh__item-icon {
+  grid-row: span 3;
+  align-self: start;
+  font-size: 1.05rem;
+  color: var(--on-surface-variant);
+}
+
+.export-mesh__item--running .export-mesh__item-icon {
+  color: var(--primary);
+  animation: export-mesh-spin 1.2s linear infinite;
+}
+
+.export-mesh__item--done .export-mesh__item-icon { color: #9cffce; }
+.export-mesh__item--failed .export-mesh__item-icon { color: #ff9c9c; }
+.export-mesh__item--skipped { opacity: 0.55; }
+
+.export-mesh__item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--on-surface);
+}
+
+.export-mesh__item-file,
+.export-mesh__item-message {
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  color: var(--on-surface-variant);
+}
+
+.export-mesh__item--failed .export-mesh__item-message {
+  color: #ff9c9c;
+  white-space: normal;
+}
+
+@keyframes export-mesh-spin {
+  to { transform: rotate(360deg); }
+}

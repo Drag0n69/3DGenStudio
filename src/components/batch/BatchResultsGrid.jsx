@@ -13,11 +13,26 @@ export default function BatchResultsGrid({
   assetsByCardKey,
   locked,
   onOpenAsset,
-  onDeleteResult
+  onDeleteResult,
+  onExport
 }) {
   if (groups.length === 0 || stages.length === 0) {
     return null
   }
+
+  // The finished results of each stage, in row order. What a batch is usually
+  // exported for is ONE column — the last stage's meshes — and only this grid
+  // knows which stage made what: in the Assets library every mesh->mesh stage
+  // is just another version of the same root.
+  const resultsByStage = onExport
+    ? Object.fromEntries(stages.map(stage => [stage.id, groups
+      .map(group => {
+        const cell = cells?.[`${group.id}:${stage.id}`] || null
+        return cell?.status === 'completed' && cell.cardKey ? assetsByCardKey?.[cell.cardKey] || null : null
+      })
+      .filter(Boolean)]))
+    : {}
+  const allResults = stages.flatMap(stage => resultsByStage[stage.id] || [])
 
   return (
     <div className="batch-results">
@@ -27,6 +42,18 @@ export default function BatchResultsGrid({
           One card per result, in the project like any other generation
           {onDeleteResult ? ' · delete one to run its stage again with Continue' : ''}
         </span>
+        {allResults.length > 0 && (
+          <button
+            type="button"
+            className="batch-results__export"
+            onClick={() => onExport(allResults, 'All stages')}
+            disabled={locked}
+            title="Export every finished result of every stage"
+          >
+            <span className="material-symbols-outlined">download</span>
+            Export all ({allResults.length})
+          </button>
+        )}
       </div>
 
       <div className="batch-results__scroll">
@@ -36,7 +63,21 @@ export default function BatchResultsGrid({
               <th className="batch-results__corner" />
               {stages.map((stage, stageIndex) => (
                 <th key={stage.id} className="batch-results__col-head">
-                  {getStageLabel(stage, stageIndex)}
+                  <div className="batch-results__col-head-row">
+                    <span>{getStageLabel(stage, stageIndex)}</span>
+                    {resultsByStage[stage.id]?.length > 0 && (
+                      <button
+                        type="button"
+                        className="batch-results__export batch-results__export--stage"
+                        onClick={() => onExport(resultsByStage[stage.id], getStageLabel(stage, stageIndex))}
+                        disabled={locked}
+                        title={`Export the ${resultsByStage[stage.id].length} finished result${resultsByStage[stage.id].length === 1 ? '' : 's'} of this stage`}
+                      >
+                        <span className="material-symbols-outlined">download</span>
+                        {resultsByStage[stage.id].length}
+                      </button>
+                    )}
+                  </div>
                 </th>
               ))}
             </tr>

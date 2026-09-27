@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router-dom'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
 import MeshPreviewDialog from '../components/MeshPreviewDialog'
+import ExportMeshDialog from '../components/ExportMeshDialog'
 import SettingsModal from '../components/SettingsModal'
 import TagFilter from '../components/TagFilter'
 import VfxImportDialog from '../components/vfx/VfxImportDialog'
 import BuildingImportDialog from '../components/building/BuildingImportDialog'
 import BuildingBundleExportDialog from '../components/building/BuildingBundleExportDialog'
 import { useProjects } from '../context/ProjectContext'
+import { assetUrl } from '../config'
 import { createMeshThumbnailFile, isMeshFile } from '../utils/meshThumbnail'
 import { parseAbrFile } from '../utils/brushAbr'
 import { downloadShareableWorkflow, isShareableWorkflow } from '../utils/workflowShare'
@@ -197,6 +199,59 @@ function formatDimensions(width, height) {
 
 function getAssetChildren(asset) {
   return asset?.children || asset?.edits || []
+}
+
+// What an image's children are called, and what every other type's are.
+function getChildNoun(type) {
+  return type === 'image' || type === 'brush' ? 'Edit' : 'Version'
+}
+
+// Which roots, children or both the grid lists. Children are hidden by default
+// (the page has always listed roots), but a batch export often wants exactly
+// the children: every mesh->mesh Batch stage saves a VERSION of its input.
+const CHILD_VIEWS = ['roots', 'all', 'children']
+
+// A child as a grid entry of its own, shaped like a root so the filters, the
+// card and the selection treat both alike. The server always attaches a
+// version to the ROOT (never to another version), so one level is all there is.
+// Project links and tags fall back to the root's, as in AssetSelectorModal: a
+// version nobody tagged is still found by its root's tags.
+function toChildEntry(root, child, index) {
+  return {
+    ...child,
+    id: `child:${child.id}`,
+    assetId: child.id,
+    type: root.type,
+    isChild: true,
+    parentName: root.name,
+    name: child.name?.trim() || `${root.name} · ${getChildNoun(root.type)} ${index + 1}`,
+    extension: (child.filename?.split('.').pop() || root.extension || '').toUpperCase(),
+    url: child.url || assetUrl(child.filename),
+    projectId: child.projectId ?? root.projectId ?? null,
+    projectIds: child.projectIds?.length ? child.projectIds : (root.projectIds || []),
+    tags: child.tags?.length ? child.tags : (root.tags || [])
+  }
+}
+
+// A grid entry's own id where a route needs one: the `child:` prefix only
+// exists to keep React keys apart from the roots' `library:` ids.
+function withRouteId(asset) {
+  return asset.isChild ? { ...asset, id: asset.assetId } : asset
+}
+
+// Stable across pages, sections and reloads; a file path is unique per asset.
+function getSelectionKey(asset) {
+  return `${asset.type}:${asset.filePath || asset.filename}`
+}
+
+function toExportItem(asset) {
+  return {
+    key: getSelectionKey(asset),
+    name: asset.name,
+    url: asset.url || assetUrl(asset.filename),
+    filename: asset.filename,
+    kind: asset.type === 'mesh' ? 'mesh' : 'file'
+  }
 }
 
 function buildMeshEditorPath(asset, returnTo = '/assets') {
@@ -435,6 +490,12 @@ export default function AssetsPage() {
   const [tagEditorInput, setTagEditorInput] = useState('')
   const [tagEditorSaving, setTagEditorSaving] = useState(false)
   const [tagEditorError, setTagEditorError] = useState('')
+  const [childView, setChildView] = useState('roots')
+  // Batch export selection: selection key -> true. Page-independent, so it
+  // survives paging, filtering and switching section — images and meshes can
+  // go out in one export.
+  const [selectedExports, setSelectedExports] = useState({})
+  const [batchExportItems, setBatchExportItems] = useState(null)
   const assetFileInputRef = useRef(null)
   const workflowFileInputRef = useRef(null)
 
@@ -480,7 +541,7 @@ export default function AssetsPage() {
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [activeSection, searchQuery, projectFilter, tagFilter])
+  }, [activeSection, searchQuery, projectFilter, tagFilter, childView])
 
   // Reset the project and tag filters when switching type sections so a filter
   // chosen for Images doesn't silently hide everything under Meshes.
@@ -564,7 +625,22 @@ export default function AssetsPage() {
 
   const activeConfig = ASSET_SECTIONS.find(section => section.key === activeSection) || ASSET_SECTIONS[0]
   const isWorkflowSection = activeSection === 'workflows'
-  const sectionAssets = isWorkflowSection ? [] : (libraryAssets[activeConfig.key] || [])
+  const sectionRoots = useMemo(
+    () => (isWorkflowSection ? [] : (libraryAssets[activeConfig.key] || [])),
+    [isWorkflowSection, libraryAssets, activeConfig.key]
+  )
+  const sectionHasChildren = sectionRoots.some(asset => getAssetChildren(asset).length > 0)
+  const effectiveChildView = sectionHasChildren ? childView : 'roots'
+  // Each child is listed right after its root, so "Originals + versions" reads
+  // as families rather than as two interleaved lists.
+  const sectionAssets = useMemo(() => {
+    if (effectiveChildView === 'roots') return sectionRoots
+    return sectionRoots.flatMap(root => {
+      const children = getAssetChildren(root).map((child, index) => toChildEntry(root, child, index))
+      return effectiveChildView === 'children' ? children : [root, ...children]
+    })
+  }, [sectionRoots, effectiveChildView])
+  const childNoun = activeSection === 'images' || activeSection === 'brushes' ? 'edits' : 'versions'
 
   // An asset can be linked to multiple projects, so resolve every project key it
   // belongs to (falling back to the single projectId, then "Unassigned").
@@ -639,7 +715,13 @@ export default function AssetsPage() {
 
   const activeAssets = isWorkflowSection
     ? []
-    : sectionAssets.filter(asset => matchesSearch(asset.name) && matchesProjectFilter(asset) && matchesTagFilter(asset))
+    : sectionAssets.filter(asset => (
+      // A version found by its root's name too: batch results are often named
+      // after the stage, which says nothing about which mesh they came from.
+      (matchesSearch(asset.name) || (asset.isChild && matchesSearch(asset.parentName)))
+      && matchesProjectFilter(asset)
+      && matchesTagFilter(asset)
+    ))
 
   // When grouping is on we split the (already filtered) assets into one block
   // per project, named projects first (alphabetical) and "Unassigned" last.
@@ -682,6 +764,60 @@ export default function AssetsPage() {
       setCurrentPage(totalPages)
     }
   }, [currentPage, totalPages])
+
+  // --- Batch export selection --------------------------------------------------
+
+  // Every exportable asset in the library, roots and children, by selection key.
+  // The selection holds keys only and is resolved against this, so a deleted
+  // asset drops out of it and a renamed one exports under its new name.
+  const liveExportItems = useMemo(() => {
+    const live = new Map()
+    Object.values(libraryAssets).forEach(list => (list || []).forEach(root => {
+      live.set(getSelectionKey(root), toExportItem(root))
+      getAssetChildren(root).forEach((child, index) => {
+        const entry = toChildEntry(root, child, index)
+        live.set(getSelectionKey(entry), toExportItem(entry))
+      })
+    }))
+    return live
+  }, [libraryAssets])
+  const selectedItems = useMemo(
+    () => Object.keys(selectedExports).filter(key => liveExportItems.has(key)).map(key => liveExportItems.get(key)),
+    [selectedExports, liveExportItems]
+  )
+
+  // "Shown" is the current page, or every group when grouping by project (the
+  // grouped view does not paginate).
+  const shownAssets = groupByProject ? activeAssets : paginatedAssets
+  const selectedCount = selectedItems.length
+  const isAssetSelected = asset => Boolean(selectedExports[getSelectionKey(asset)])
+  const countSelected = list => list.reduce((count, asset) => count + (isAssetSelected(asset) ? 1 : 0), 0)
+  const shownSelectedCount = countSelected(shownAssets)
+  const filteredSelectedCount = countSelected(activeAssets)
+  // Selected in another section or hidden by the current filters: still part of
+  // the export, so say so rather than let the count look wrong.
+  const selectedElsewhere = selectedCount - filteredSelectedCount
+
+  const setAssetsSelected = (list, selected) => {
+    setSelectedExports(prev => {
+      const next = { ...prev }
+      list.forEach(asset => {
+        const key = getSelectionKey(asset)
+        if (selected) next[key] = true
+        else delete next[key]
+      })
+      return next
+    })
+  }
+
+  const toggleAssetSelected = asset => setAssetsSelected([asset], !isAssetSelected(asset))
+
+  const selectPageRef = useRef(null)
+  useEffect(() => {
+    if (selectPageRef.current) {
+      selectPageRef.current.indeterminate = shownSelectedCount > 0 && shownSelectedCount < shownAssets.length
+    }
+  }, [shownSelectedCount, shownAssets.length])
 
   const resetWorkflowState = () => {
     setWorkflowName('')
@@ -1480,8 +1616,50 @@ export default function AssetsPage() {
     setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
+  // A version or edit listed in the grid opens and edits like the root does.
+  // Rename, tags and delete stay in the root's versions/edits dialog, which is
+  // where they already live and where the linked-project checks are handled.
+  const renderChildActions = (asset) => {
+    const routed = withRouteId(asset)
+    if (asset.type === 'mesh') {
+      return (
+        <>
+          <button type="button" className="asset-card__link asset-card__link-btn" onClick={() => setMeshPreviewAsset(routed)}>
+            OPEN
+          </button>
+          <button type="button" className="asset-card__link asset-card__link-btn" onClick={() => navigate(buildMeshEditorPath(routed))}>
+            EDIT
+          </button>
+        </>
+      )
+    }
+    return (
+      <>
+        <a href={asset.url} target="_blank" rel="noreferrer" className="asset-card__link">OPEN</a>
+        {asset.type === 'image' && (
+          <button type="button" className="asset-card__link asset-card__link-btn" onClick={() => navigate(buildImageEditorPath(routed))}>
+            EDIT
+          </button>
+        )}
+      </>
+    )
+  }
+
   const renderAssetCard = (asset) => (
-    <article key={asset.id} className={`asset-card ${THUMBNAIL_SECTIONS.has(activeSection) ? 'asset-card--mesh' : 'asset-card--image'}`}>
+    <article
+      key={asset.id}
+      className={`asset-card ${THUMBNAIL_SECTIONS.has(activeSection) ? 'asset-card--mesh' : 'asset-card--image'} ${isAssetSelected(asset) ? 'asset-card--selected' : ''}`}
+    >
+      <label className="asset-card__select" title={isAssetSelected(asset) ? 'Remove from the export selection' : 'Select for export'}>
+        <input
+          type="checkbox"
+          checked={isAssetSelected(asset)}
+          onChange={() => toggleAssetSelected(asset)}
+        />
+      </label>
+      {asset.isChild && (
+        <span className="asset-card__child-badge font-label">{getChildNoun(asset.type).toUpperCase()}</span>
+      )}
       {activeSection === 'images' || activeSection === 'brushes' ? (
         <div className={`asset-card__preview asset-card__preview--image ${activeSection === 'brushes' ? 'asset-card__preview--brush' : ''}`}>
           <img src={asset.url} alt={asset.name} className="asset-card__image" />
@@ -1512,7 +1690,7 @@ export default function AssetsPage() {
       <div className="asset-card__body">
         <div className="asset-card__title-row">
           <h3 className="asset-card__name">{asset.name}</h3>
-          {activeSection === 'images' && (
+          {activeSection === 'images' && !asset.isChild && (
             <button
               type="button"
               className="asset-card__icon-btn asset-card__icon-btn--edit"
@@ -1524,6 +1702,9 @@ export default function AssetsPage() {
             </button>
           )}
         </div>
+        {asset.isChild && asset.parentName && (
+          <span className="asset-card__parent">from {asset.parentName}</span>
+        )}
         {getAssetTagList(asset).length > 0 && (
           <div className="asset-card__tags">
             {getAssetTagList(asset).map(tag => (
@@ -1544,6 +1725,8 @@ export default function AssetsPage() {
         <div className="asset-card__meta">
           <span className={`asset-card__badge ${THUMBNAIL_SECTIONS.has(activeSection) ? 'asset-card__badge--secondary' : ''}`}>{asset.extension}</span>
           <div className="asset-card__actions">
+            {asset.isChild ? renderChildActions(asset) : (
+            <>
             {(activeSection === 'images' || activeSection === 'brushes') && getAssetChildren(asset).length > 0 && (
               <button
                 type="button"
@@ -1669,6 +1852,8 @@ export default function AssetsPage() {
             >
               <span className="material-symbols-outlined">delete</span>
             </button>
+            </>
+            )}
           </div>
         </div>
       </div>
@@ -2007,6 +2192,12 @@ export default function AssetsPage() {
       )}
 
       {meshPreviewAsset && <MeshPreviewDialog asset={meshPreviewAsset} onClose={() => setMeshPreviewAsset(null)} />}
+
+      {/* Snapshotted when opened: the dialog walks this exact list, so the
+          selection can keep changing behind it without moving the export. */}
+      {batchExportItems && (
+        <ExportMeshDialog items={batchExportItems} onClose={() => setBatchExportItems(null)} />
+      )}
 
       {vfxImportOpen && (
         <VfxImportDialog
@@ -2378,8 +2569,22 @@ export default function AssetsPage() {
                   <div className="assets-section__summary">
                     <span>{isWorkflowSection ? `${filteredWorkflows.length} ${normalizedSearch || workflowTypeFilter !== 'all' ? 'matching' : 'total'} workflows` : `${activeAssets.length} ${normalizedSearch ? 'matching' : 'total'} assets`}</span>
                     {!isWorkflowSection && !groupByProject && <span>{pageRangeStart}-{pageRangeEnd || 0} shown</span>}
-                    {!isWorkflowSection && (projectFilterOptions.length > 0 || tagFilterOptions.length > 0) && (
+                    {!isWorkflowSection && (projectFilterOptions.length > 0 || tagFilterOptions.length > 0 || sectionHasChildren) && (
                       <div className="assets-section__controls">
+                        {sectionHasChildren && (
+                          <label className="assets-project-select" title={`List the ${childNoun} of each asset as cards of their own`}>
+                            <span className="material-symbols-outlined">history</span>
+                            <select
+                              className="assets-project-select__input"
+                              value={effectiveChildView}
+                              onChange={event => setChildView(CHILD_VIEWS.includes(event.target.value) ? event.target.value : 'roots')}
+                            >
+                              <option value="roots">Originals only</option>
+                              <option value="all">Originals + {childNoun}</option>
+                              <option value="children">{childNoun[0].toUpperCase() + childNoun.slice(1)} only</option>
+                            </select>
+                          </label>
+                        )}
                         {tagFilterOptions.length > 0 && (
                           <TagFilter
                             options={tagFilterOptions}
@@ -2425,6 +2630,53 @@ export default function AssetsPage() {
                       {importFeedback.type === 'error' ? 'error' : importFeedback.type === 'warning' ? 'warning' : 'check_circle'}
                     </span>
                     <span>{importFeedback.message}</span>
+                  </div>
+                )}
+
+                {!isWorkflowSection && (activeAssets.length > 0 || selectedCount > 0) && (
+                  <div className="assets-selection-bar">
+                    {activeAssets.length > 0 && (
+                      <label className="assets-selection-bar__check">
+                        <input
+                          ref={selectPageRef}
+                          type="checkbox"
+                          checked={shownAssets.length > 0 && shownSelectedCount === shownAssets.length}
+                          onChange={() => setAssetsSelected(shownAssets, shownSelectedCount < shownAssets.length)}
+                        />
+                        <span>{groupByProject ? 'Select all shown' : 'Select this page'}</span>
+                      </label>
+                    )}
+                    {!groupByProject && activeAssets.length > shownAssets.length && (
+                      <button
+                        type="button"
+                        className="assets-selection-bar__link"
+                        onClick={() => setAssetsSelected(activeAssets, filteredSelectedCount < activeAssets.length)}
+                      >
+                        {filteredSelectedCount < activeAssets.length
+                          ? `Select all ${activeAssets.length} (all pages)`
+                          : `Unselect all ${activeAssets.length}`}
+                      </button>
+                    )}
+                    <span className="assets-selection-bar__count">
+                      {selectedCount} selected
+                      {selectedElsewhere > 0 && ` (${selectedElsewhere} not shown — other sections or filters)`}
+                    </span>
+                    <div className="assets-selection-bar__actions">
+                      {selectedCount > 0 && (
+                        <button type="button" className="assets-selection-bar__link" onClick={() => setSelectedExports({})}>
+                          Clear
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="assets-selection-bar__export"
+                        onClick={() => setBatchExportItems(selectedItems)}
+                        disabled={selectedCount === 0}
+                      >
+                        <span className="material-symbols-outlined">download</span>
+                        <span>Export Selected</span>
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -2575,7 +2827,11 @@ export default function AssetsPage() {
                 ) : (
                   <div className="assets-page__empty-state">
                     <span className="material-symbols-outlined">{activeConfig.emptyIcon}</span>
-                    <span>{normalizedSearch && sectionAssets.length > 0 ? `No ${activeConfig.label.toLowerCase()} match your search.` : activeConfig.emptyMessage}</span>
+                    <span>
+                      {sectionAssets.length > 0
+                        ? `No ${activeConfig.label.toLowerCase()} match your filters.`
+                        : activeConfig.emptyMessage}
+                    </span>
                   </div>
                 )}
               </section>

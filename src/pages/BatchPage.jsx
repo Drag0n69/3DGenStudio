@@ -4,6 +4,7 @@ import Header from '../components/Header'
 import Footer from '../components/Footer'
 import SettingsModal from '../components/SettingsModal'
 import AssetSelectorModal from '../components/AssetSelectorModal'
+import ExportMeshDialog from '../components/ExportMeshDialog'
 import BatchVariablesColumn from '../components/batch/BatchVariablesColumn'
 import BatchStageColumn from '../components/batch/BatchStageColumn'
 import BatchResultsGrid from '../components/batch/BatchResultsGrid'
@@ -72,6 +73,8 @@ export default function BatchPage({ project }) {
   const [loading, setLoading] = useState(true)
   const [saveStatus, setSaveStatus] = useState('idle')
   const [showSettings, setShowSettings] = useState(false)
+  // Results handed to the batch export dialog (one stage's column, or all).
+  const [exportItems, setExportItems] = useState(null)
   // Collapsed by default: a long problem list used to push the whole workspace
   // below the fold. The count stays visible either way.
   const [problemsOpen, setProblemsOpen] = useState(false)
@@ -592,6 +595,18 @@ export default function BatchPage({ project }) {
     if (path) navigate(path)
   }, [navigate, project.id])
 
+  // Meshes go through the export settings; images and anything else a stage
+  // produced are copied as they are.
+  const handleExportResults = useCallback((results) => {
+    setExportItems(results.map(asset => ({
+      key: `${asset.type}:${asset.filePath || asset.filename}`,
+      name: asset.name || asset.filename,
+      url: getAssetPreviewUrl(asset.filename),
+      filename: asset.filename,
+      kind: asset.type === 'mesh' ? 'mesh' : 'file'
+    })))
+  }, [])
+
   const handleRequestDeleteResult = useCallback((target) => {
     setDeleteError('')
     setDeleteTarget({
@@ -778,6 +793,10 @@ export default function BatchPage({ project }) {
       />
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {exportItems && (
+        <ExportMeshDialog items={exportItems} onClose={() => setExportItems(null)} />
+      )}
 
       {assetPicker && (
         <AssetSelectorModal
@@ -1128,6 +1147,7 @@ export default function BatchPage({ project }) {
             locked={isRunning}
             onOpenAsset={handleOpenAsset}
             onDeleteResult={handleRequestDeleteResult}
+            onExport={handleExportResults}
           />
         )}
       </main>
