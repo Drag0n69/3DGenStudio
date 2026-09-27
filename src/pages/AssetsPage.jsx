@@ -4,6 +4,7 @@ import Header from '../components/Header'
 import Footer from '../components/Footer'
 import MeshPreviewDialog from '../components/MeshPreviewDialog'
 import ExportMeshDialog from '../components/ExportMeshDialog'
+import ExportFilesFlow from '../components/ExportFilesFlow'
 import SettingsModal from '../components/SettingsModal'
 import TagFilter from '../components/TagFilter'
 import VfxImportDialog from '../components/vfx/VfxImportDialog'
@@ -26,6 +27,13 @@ import './AssetsPage.css'
 // test appeared in three separate places as a chain of ||, and every new
 // section of this kind had to be added to all three.
 const THUMBNAIL_SECTIONS = new Set(['meshes', 'trees', 'vfx', 'buildings'])
+
+// Sections whose assets the batch export handles. Tree presets, VFX and
+// buildings are left out on purpose: each has its own export (LODs and an
+// impostor, an engine bundle, the graph with its textures and models), and a
+// raw copy of the .json would look like an export while leaving all of that
+// behind.
+const BATCH_EXPORT_SECTIONS = new Set(['images', 'meshes', 'brushes'])
 
 const ASSETS_PER_PAGE = 20
 // The mesh grid is 3 columns wide, so 21 (7 full rows) paginates more cleanly
@@ -798,9 +806,12 @@ export default function AssetsPage() {
   // Every exportable asset in the library, roots and children, by selection key.
   // The selection holds keys only and is resolved against this, so a deleted
   // asset drops out of it and a renamed one exports under its new name.
+  const sectionIsBatchExportable = BATCH_EXPORT_SECTIONS.has(activeSection)
+
+  // Only the batch-exportable sections, so nothing else can reach an export.
   const liveExportItems = useMemo(() => {
     const live = new Map()
-    Object.values(libraryAssets).forEach(list => (list || []).forEach(root => {
+    BATCH_EXPORT_SECTIONS.forEach(sectionKey => (libraryAssets[sectionKey] || []).forEach(root => {
       live.set(getSelectionKey(root), toExportItem(root))
       getAssetChildren(root).forEach((child, index) => {
         const entry = toChildEntry(root, child, index)
@@ -1678,13 +1689,15 @@ export default function AssetsPage() {
       key={asset.id}
       className={`asset-card ${THUMBNAIL_SECTIONS.has(activeSection) ? 'asset-card--mesh' : 'asset-card--image'} ${isAssetSelected(asset) ? 'asset-card--selected' : ''}`}
     >
-      <label className="asset-card__select" title={isAssetSelected(asset) ? 'Remove from the export selection' : 'Select for export'}>
-        <input
-          type="checkbox"
-          checked={isAssetSelected(asset)}
-          onChange={() => toggleAssetSelected(asset)}
-        />
-      </label>
+      {sectionIsBatchExportable && (
+        <label className="asset-card__select" title={isAssetSelected(asset) ? 'Remove from the export selection' : 'Select for export'}>
+          <input
+            type="checkbox"
+            checked={isAssetSelected(asset)}
+            onChange={() => toggleAssetSelected(asset)}
+          />
+        </label>
+      )}
       {asset.isChild && (
         <span className="asset-card__child-badge font-label">{getChildNoun(asset.type).toUpperCase()}</span>
       )}
@@ -2221,11 +2234,14 @@ export default function AssetsPage() {
 
       {meshPreviewAsset && <MeshPreviewDialog asset={meshPreviewAsset} onClose={() => setMeshPreviewAsset(null)} />}
 
-      {/* Snapshotted when opened: the dialog walks this exact list, so the
-          selection can keep changing behind it without moving the export. */}
-      {batchExportItems && (
+      {/* Snapshotted when opened: the export walks this exact list, so the
+          selection can keep changing behind it without moving the export.
+          Only meshes have settings; a selection without any only asks where. */}
+      {batchExportItems && (batchExportItems.some(item => item.kind === 'mesh') ? (
         <ExportMeshDialog items={batchExportItems} onClose={() => setBatchExportItems(null)} />
-      )}
+      ) : (
+        <ExportFilesFlow items={batchExportItems} onClose={() => setBatchExportItems(null)} />
+      ))}
 
       {vfxImportOpen && (
         <VfxImportDialog
@@ -2677,9 +2693,11 @@ export default function AssetsPage() {
                   </div>
                 )}
 
-                {!isWorkflowSection && (activeAssets.length > 0 || selectedCount > 0) && (
+                {/* In a section that has its own export the bar only carries a
+                    selection made elsewhere, so it stays visible and exportable. */}
+                {!isWorkflowSection && ((sectionIsBatchExportable && activeAssets.length > 0) || selectedCount > 0) && (
                   <div className="assets-selection-bar">
-                    {activeAssets.length > 0 && (
+                    {sectionIsBatchExportable && activeAssets.length > 0 && (
                       <label className="assets-selection-bar__check">
                         <input
                           ref={selectPageRef}
@@ -2690,7 +2708,7 @@ export default function AssetsPage() {
                         <span>{groupByProject ? 'Select all shown' : 'Select this page'}</span>
                       </label>
                     )}
-                    {!groupByProject && activeAssets.length > shownAssets.length && (
+                    {sectionIsBatchExportable && !groupByProject && activeAssets.length > shownAssets.length && (
                       <button
                         type="button"
                         className="assets-selection-bar__link"

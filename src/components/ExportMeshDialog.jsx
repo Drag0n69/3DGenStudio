@@ -2,9 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import FolderBrowserDialog from './FolderBrowserDialog'
 import {
   EXPORT_FORMATS,
+  LAST_EXPORT_FOLDER_KEY,
   attachBakedMaps,
   browseFolders,
   exportObject3D,
+  fetchAssetFile,
+  fileExtension,
   isGlbUrl,
   loadGlbBlob,
   loadObject3DFromUrl,
@@ -13,6 +16,7 @@ import {
   mergeCollisionForUnreal,
   object3DHasUvs,
   sanitizeBaseName,
+  uniqueExportBaseNames,
   uvsAreBroken,
   writeExportedFiles
 } from '../utils/meshExport'
@@ -41,7 +45,7 @@ import {
 } from '../utils/meshFlatten'
 import './ExportMeshDialog.css'
 
-const LAST_OUTPUT_FOLDER_KEY = 'exportMeshDialog:lastOutputFolder'
+const LAST_OUTPUT_FOLDER_KEY = LAST_EXPORT_FOLDER_KEY
 
 // Bake request order. 'orm' is never requested — the service packs it from
 // ao/roughness/metallic — but it does come back in the result.
@@ -54,29 +58,6 @@ const LOD_BAKE_MAPS = ['normal', 'ao', 'base_color', 'roughness', 'metallic']
 function lodBakeResolution(base, level, falloff) {
   if (!falloff) return base
   return Math.max(512, Math.round(base / 2 ** Math.max(0, level - 1)))
-}
-
-// One file base per batch item, unique within the batch. Batch results are
-// named from a template, so two meshes sharing a name is the normal case, not
-// an edge case — and the writer overwrites silently, so without this the second
-// "Knight" would replace the first one's files without a word.
-function uniqueBaseNames(items) {
-  const used = new Set()
-  return items.map(item => {
-    const base = sanitizeBaseName(item.name || item.filename || 'asset')
-    let candidate = base
-    for (let n = 2; used.has(candidate.toLowerCase()); n += 1) {
-      candidate = `${base}_${n}`
-    }
-    used.add(candidate.toLowerCase())
-    return candidate
-  })
-}
-
-function fileExtension(filenameOrUrl) {
-  const clean = String(filenameOrUrl || '').split('?')[0].split('#')[0]
-  const match = clean.match(/\.[a-zA-Z0-9]+$/)
-  return match ? match[0].toLowerCase() : ''
 }
 
 // The folder is a path on the machine running the server, typed or browsed by
@@ -112,7 +93,7 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   const meshItemCount = batchMode ? items.filter(item => item.kind === 'mesh').length : 0
   // Only a batch of plain files (images, presets) has no mesh settings to show.
   const hasMeshes = !batchMode || meshItemCount > 0
-  const batchBases = useMemo(() => (batchMode ? uniqueBaseNames(items) : []), [batchMode, items])
+  const batchBases = useMemo(() => (batchMode ? uniqueExportBaseNames(items) : []), [batchMode, items])
   const [batchStatus, setBatchStatus] = useState({})
   // LOD chains and OBJ write several files per mesh, which gets unreadable in
   // one flat folder once there are hundreds of meshes.
@@ -655,11 +636,7 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
             if (subfolderPerMesh) target = joinFolder(folder, base)
           } else {
             report(0.3, 'Copying the file…')
-            const response = await fetch(item.url)
-            if (!response.ok) {
-              throw new Error(`Could not fetch the file (HTTP ${response.status}).`)
-            }
-            files = [{ filename: `${base}${fileExtension(item.filename || item.url)}`, blob: await response.blob() }]
+            files = [await fetchAssetFile(item, base)]
           }
 
           report(0.98, 'Writing files…')

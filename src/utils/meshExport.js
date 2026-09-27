@@ -877,6 +877,44 @@ export async function writeExportedFiles(folder, files) {
   return data
 }
 
+// The last folder anything was exported to. One key for every export path
+// (mesh dialog, batch export, plain-file export), so they all reopen where the
+// previous export went.
+export const LAST_EXPORT_FOLDER_KEY = 'exportMeshDialog:lastOutputFolder'
+
+export function fileExtension(filenameOrUrl) {
+  const clean = String(filenameOrUrl || '').split('?')[0].split('#')[0]
+  const match = clean.match(/\.[a-zA-Z0-9]+$/)
+  return match ? match[0].toLowerCase() : ''
+}
+
+// One file base per batch item, unique within the batch. Batch results are
+// named from a template, so two assets sharing a name is the normal case, not
+// an edge case — and the writer overwrites silently, so without this the second
+// "Knight" would replace the first one's files without a word.
+export function uniqueExportBaseNames(items) {
+  const used = new Set()
+  return items.map(item => {
+    const base = sanitizeBaseName(item.name || item.filename || 'asset')
+    let candidate = base
+    for (let n = 2; used.has(candidate.toLowerCase()); n += 1) {
+      candidate = `${base}_${n}`
+    }
+    used.add(candidate.toLowerCase())
+    return candidate
+  })
+}
+
+// A library file exactly as stored, named after its asset: `item` is a batch
+// export item ({ url, filename }), `base` its unique base name.
+export async function fetchAssetFile(item, base) {
+  const response = await fetch(item.url)
+  if (!response.ok) {
+    throw new Error(`Could not fetch the file (HTTP ${response.status}).`)
+  }
+  return { filename: `${base}${fileExtension(item.filename || item.url)}`, blob: await response.blob() }
+}
+
 // Folder browser API used by the export dialog's folder picker.
 export async function browseFolders(path) {
   const query = path ? `?path=${encodeURIComponent(path)}` : ''

@@ -5,6 +5,7 @@ import Footer from '../components/Footer'
 import SettingsModal from '../components/SettingsModal'
 import AssetSelectorModal from '../components/AssetSelectorModal'
 import ExportMeshDialog from '../components/ExportMeshDialog'
+import ExportFilesFlow from '../components/ExportFilesFlow'
 import BatchVariablesColumn from '../components/batch/BatchVariablesColumn'
 import BatchStageColumn from '../components/batch/BatchStageColumn'
 import BatchResultsGrid from '../components/batch/BatchResultsGrid'
@@ -794,9 +795,12 @@ export default function BatchPage({ project }) {
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
 
-      {exportItems && (
+      {/* An image-only stage has no settings to choose, only a folder. */}
+      {exportItems && (exportItems.some(item => item.kind === 'mesh') ? (
         <ExportMeshDialog items={exportItems} onClose={() => setExportItems(null)} />
-      )}
+      ) : (
+        <ExportFilesFlow items={exportItems} onClose={() => setExportItems(null)} />
+      ))}
 
       {assetPicker && (
         <AssetSelectorModal
