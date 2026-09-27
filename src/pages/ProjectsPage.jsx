@@ -28,6 +28,20 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v3.5.2',
+    date: '2026-09-27',
+    items: [
+			'Batch Project: Moved execution to the backend',
+			'Batch Project: Stage supports ComfyUI, Optimize, AutoRig and Bake',
+			'Assets Page: Can search/filter versions of images/meshes',
+			'Assets Page: Can export a list of assets',
+			'Export Mesh: Can flat PBR textures to albedo (mobile)',
+			'Export Project: Use the asset name instead of the id',
+			'Delete Asset: Fix a bug',
+			'ComfyUI: Fixed Pixal3D and updated nodes'
+    ]
+  },
+  {
     version: 'v3.5.1',
     date: '2026-09-23',
     items: [
