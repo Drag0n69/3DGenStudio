@@ -13,11 +13,26 @@ export default function BatchResultsGrid({
   assetsByCardKey,
   locked,
   onOpenAsset,
-  onDeleteResult
+  onDeleteResult,
+  onExport
 }) {
   if (groups.length === 0 || stages.length === 0) {
     return null
   }
+
+  // The finished results of each stage, in row order. What a batch is usually
+  // exported for is ONE column — the last stage's meshes — and only this grid
+  // knows which stage made what: in the Assets library every mesh->mesh stage
+  // is just another version of the same root.
+  const resultsByStage = onExport
+    ? Object.fromEntries(stages.map(stage => [stage.id, groups
+      .map(group => {
+        const cell = cells?.[`${group.id}:${stage.id}`] || null
+        return cell?.status === 'completed' && cell.cardKey ? assetsByCardKey?.[cell.cardKey] || null : null
+      })
+      .filter(Boolean)]))
+    : {}
+  const allResults = stages.flatMap(stage => resultsByStage[stage.id] || [])
 
   return (
     <div className="batch-results">
@@ -27,6 +42,18 @@ export default function BatchResultsGrid({
           One card per result, in the project like any other generation
           {onDeleteResult ? ' · delete one to run its stage again with Continue' : ''}
         </span>
+        {allResults.length > 0 && (
+          <button
+            type="button"
+            className="batch-results__export"
+            onClick={() => onExport(allResults, 'All stages')}
+            disabled={locked}
+            title="Export every finished result of every stage"
+          >
+            <span className="material-symbols-outlined">download</span>
+            Export all ({allResults.length})
+          </button>
+        )}
       </div>
 
       <div className="batch-results__scroll">
@@ -36,7 +63,21 @@ export default function BatchResultsGrid({
               <th className="batch-results__corner" />
               {stages.map((stage, stageIndex) => (
                 <th key={stage.id} className="batch-results__col-head">
-                  {getStageLabel(stage, stageIndex)}
+                  <div className="batch-results__col-head-row">
+                    <span>{getStageLabel(stage, stageIndex)}</span>
+                    {resultsByStage[stage.id]?.length > 0 && (
+                      <button
+                        type="button"
+                        className="batch-results__export batch-results__export--stage"
+                        onClick={() => onExport(resultsByStage[stage.id], getStageLabel(stage, stageIndex))}
+                        disabled={locked}
+                        title={`Export the ${resultsByStage[stage.id].length} finished result${resultsByStage[stage.id].length === 1 ? '' : 's'} of this stage`}
+                      >
+                        <span className="material-symbols-outlined">download</span>
+                        {resultsByStage[stage.id].length}
+                      </button>
+                    )}
+                  </div>
                 </th>
               ))}
             </tr>
@@ -48,7 +89,11 @@ export default function BatchResultsGrid({
                 {stages.map((stage, stageIndex) => {
                   const cell = cells?.[`${group.id}:${stage.id}`] || null
                   const asset = cell?.cardKey ? assetsByCardKey?.[cell.cardKey] || null : null
-                  const previewUrl = getAssetPreviewUrl(asset?.thumbnail || asset?.filename || null)
+                  // A mesh without a thumbnail draws the status icon: pointing an
+                  // <img> at the .glb itself would just be a broken image.
+                  const previewUrl = getAssetPreviewUrl(asset?.thumbnail
+                    || (asset?.type === 'mesh' ? null : asset?.filename)
+                    || null)
                   const status = cell?.status || 'idle'
                   // Anything the run has already settled can be thrown away and
                   // regenerated; a cell still in flight owns its card.
@@ -84,7 +129,8 @@ export default function BatchResultsGrid({
                           className="batch-results__cell-btn"
                           onClick={() => asset && onOpenAsset?.(asset)}
                           disabled={!asset}
-                          title={cell?.error || (asset ? asset.name : describeCell(cell))}
+                          title={cell?.error
+                            || (asset ? [asset.name, cell?.warning].filter(Boolean).join('\n') : describeCell(cell))}
                         >
                           {previewUrl ? (
                             <img className="batch-results__thumb" src={previewUrl} alt={asset?.name || ''} />
@@ -101,6 +147,14 @@ export default function BatchResultsGrid({
                           {cell?.extraOutputs > 0 && (
                             <span className="batch-results__extra font-label">
                               +{cell.extraOutputs} more output{cell.extraOutputs === 1 ? '' : 's'}
+                            </span>
+                          )}
+                          {/* Landed, but worth a look — a bake that reached little of
+                              the UVs, an optimize that stopped short of its target.
+                              Only the live run knows; a reload shows the result alone. */}
+                          {status === 'completed' && cell?.warning && (
+                            <span className="batch-results__extra font-label" style={{ color: '#e0a030' }}>
+                              Check result — hover for why
                             </span>
                           )}
                         </button>

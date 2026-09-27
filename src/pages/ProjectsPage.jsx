@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useProjects } from '../context/ProjectContext'
 import { useSettings } from '../context/SettingsContext.shared'
+import { useNotifications } from '../context/NotificationContext'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
 import SettingsModal from '../components/SettingsModal'
@@ -26,6 +27,20 @@ const PRESETS = [
 ]
 
 const CHANGE_LOG_ENTRIES = [
+  {
+    version: 'v3.5.2',
+    date: '2026-09-27',
+    items: [
+			'Batch Project: Moved execution to the backend',
+			'Batch Project: Stage supports ComfyUI, Optimize, AutoRig and Bake',
+			'Assets Page: Can search/filter versions of images/meshes',
+			'Assets Page: Can export a list of assets',
+			'Export Mesh: Can flat PBR textures to albedo (mobile)',
+			'Export Project: Use the asset name instead of the id',
+			'Delete Asset: Fix a bug',
+			'ComfyUI: Fixed Pixal3D and updated nodes'
+    ]
+  },
   {
     version: 'v3.5.1',
     date: '2026-09-23',
@@ -628,6 +643,7 @@ const CHANGE_LOG_ENTRIES = [
 export default function ProjectsPage() {
   const { projects, createProject, updateProject, deleteProject } = useProjects()
   const { settings, loading: settingsLoading } = useSettings()
+  const { addNotification } = useNotifications()
   const navigate = useNavigate()
   const [showCreate, setShowCreate] = useState(false)
   const [showChangeLog, setShowChangeLog] = useState(false)
@@ -661,7 +677,16 @@ export default function ProjectsPage() {
     if (!projectToDelete) return
     const id = projectToDelete.id
     setProjectToDelete(null)
-    await deleteProject(id, { deleteAssets })
+    try {
+      await deleteProject(id, { deleteAssets })
+    } catch (err) {
+      addNotification({
+        title: 'Project not deleted',
+        message: err.message || 'Failed to delete project',
+        source: 'Projects',
+        tone: 'error'
+      })
+    }
   }
 
   const openEdit = (project) => {

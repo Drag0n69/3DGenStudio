@@ -439,6 +439,45 @@
 
 .batch-results__scroll { overflow-x: auto; }
 
+.batch-results__col-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.batch-results__export {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid rgba(143, 245, 255, 0.28);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--primary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.batch-results__export .material-symbols-outlined {
+  font-size: 1rem;
+}
+
+.batch-results__export:hover:not(:disabled) {
+  background: rgba(143, 245, 255, 0.08);
+}
+
+.batch-results__export:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.batch-results__export--stage {
+  padding: 0.15rem 0.45rem;
+}
+
 .batch-results__table {
   border-collapse: collapse;
   width: 100%;

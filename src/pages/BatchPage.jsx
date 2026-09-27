@@ -4,15 +4,19 @@ import Header from '../components/Header'
 import Footer from '../components/Footer'
 import SettingsModal from '../components/SettingsModal'
 import AssetSelectorModal from '../components/AssetSelectorModal'
+import ExportMeshDialog from '../components/ExportMeshDialog'
+import ExportFilesFlow from '../components/ExportFilesFlow'
 import BatchVariablesColumn from '../components/batch/BatchVariablesColumn'
 import BatchStageColumn from '../components/batch/BatchStageColumn'
 import BatchResultsGrid from '../components/batch/BatchResultsGrid'
 import { useProjects } from '../context/ProjectContext'
 import { useBatchRun } from '../context/BatchRunContext'
-import { createMeshThumbnailFile } from '../utils/meshThumbnail'
+import { createMeshThumbnailFile, createMeshThumbnailFileFromUrl } from '../utils/meshThumbnail'
+import { ensureDesktopService } from '../utils/meshTools'
 import {
   buildImageEditorPath,
   buildMeshEditorPath,
+  getAssetPreviewUrl,
   getWorkflowFileInputAccept
 } from '../utils/graphHelpers'
 import {
@@ -28,9 +32,13 @@ import {
   deriveCellsFromAssets,
   getBatchAssetIds,
   getGroupLabel,
+  getBatchActionDescriptor,
   getRunIdFromCells,
+  getStageAction,
   getStageLabel,
+  getStageWorkflow,
   isBatchStageWorkflow,
+  normalizeBatchAction,
   variableValueKind,
   summarizeRunProgress,
   normalizeBatchConfig,
@@ -40,7 +48,8 @@ import './BatchPage.css'
 
 const AUTOSAVE_DELAY = 700
 
-// A "Batch" preset project: run one linear chain of ComfyUI workflows once per
+// A "Batch" preset project: run one linear chain of stages — ComfyUI workflows
+// or the Mesh Editor's Optimize / Auto Rig / Bake — once per
 // group of parameter values. Each executed cell becomes a normal project Card
 // carrying its asset, so results behave like any other generation.
 export default function BatchPage({ project }) {
@@ -65,6 +74,8 @@ export default function BatchPage({ project }) {
   const [loading, setLoading] = useState(true)
   const [saveStatus, setSaveStatus] = useState('idle')
   const [showSettings, setShowSettings] = useState(false)
+  // Results handed to the batch export dialog (one stage's column, or all).
+  const [exportItems, setExportItems] = useState(null)
   // Collapsed by default: a long problem list used to push the whole workspace
   // below the fold. The count stays visible either way.
   const [problemsOpen, setProblemsOpen] = useState(false)
@@ -82,12 +93,15 @@ export default function BatchPage({ project }) {
   const [deleteTarget, setDeleteTarget] = useState(null) // null = dialog closed
   const [deletingResult, setDeletingResult] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  const [runError, setRunError] = useState('')
+  const [startingRun, setStartingRun] = useState(false)
 
   const saveTimerRef = useRef(null)
   const lastSavedRef = useRef('')
   const hydratedRef = useRef(false)
   const fileInputRef = useRef(null)
   const uploadTargetRef = useRef(null)
+  const thumbnailAttemptsRef = useRef(new Set())
 
   // Any workflow can be a stage: the chain mixes image generation, image edit
   // and mesh generation, so everything that produces an image or a mesh is
@@ -119,9 +133,18 @@ export default function BatchPage({ project }) {
     }
   }, [getProjectAssets, project.id])
 
-  // The run lives above the router, so opening a result in an editor and coming
-  // back finds the batch still going with its grid intact.
-  const { runState, resultsVersion, startBatch, cancelBatch, clearCells } = useBatchRun(project.id)
+  // The run lives in the backend, so it keeps going while this tab is asleep,
+  // reloaded or closed; the page only draws it. `runStateSynced` is false until
+  // the backend has said which runs exist — until then an idle-looking grid
+  // might be a batch that is running, so Run and Continue stay disabled.
+  const {
+    runState,
+    synced: runStateSynced,
+    resultsVersion,
+    startBatch,
+    cancelBatch,
+    clearCells
+  } = useBatchRun(project.id)
   const isRunning = runState.status === 'running' || runState.status === 'cancelling'
 
   // Re-fetch as each cell settles so thumbnails appear while the batch runs, and
@@ -131,6 +154,42 @@ export default function BatchPage({ project }) {
       refreshAssets()
     }
   }, [resultsVersion, loading, refreshAssets])
+
+  // The backend renders a result mesh's thumbnail through the mesh-tools
+  // service, and saves the mesh without one when that service is not running.
+  // Such results get their thumbnail rendered here instead — one at a time, and
+  // once per asset per visit, so a mesh that cannot be rendered is not retried
+  // on every refresh.
+  useEffect(() => {
+    const missing = assets.filter(asset => asset?.type === 'mesh'
+      && !asset.thumbnail
+      && asset.filename
+      && String(asset.cardKey || '').startsWith('batch:')
+      && !thumbnailAttemptsRef.current.has(asset.id))
+    if (missing.length === 0) {
+      return
+    }
+    missing.forEach(asset => thumbnailAttemptsRef.current.add(asset.id))
+
+    ;(async () => {
+      let rendered = 0
+      for (const asset of missing) {
+        try {
+          const fileName = String(asset.filename).split('/').pop() || `${asset.name || 'mesh'}.glb`
+          const thumbnailFile = await createMeshThumbnailFileFromUrl(getAssetPreviewUrl(asset.filename), fileName)
+          if (thumbnailFile) {
+            await uploadAssetThumbnail(asset.id, thumbnailFile)
+            rendered += 1
+          }
+        } catch (err) {
+          console.warn(`Failed to render a thumbnail for ${asset.name || asset.id}:`, err)
+        }
+      }
+      if (rendered > 0) {
+        refreshAssets()
+      }
+    })()
+  }, [assets, refreshAssets, uploadAssetThumbnail])
 
   useEffect(() => {
     let cancelled = false
@@ -289,23 +348,30 @@ export default function BatchPage({ project }) {
     patchConfig(current => ({ ...current, stages: [...current.stages, createStage()] }))
   }, [patchConfig])
 
-  // Changing the workflow invalidates every binding and manual value, since they
-  // were keyed to the previous workflow's parameter ids. The replacement is
-  // seeded from the new workflow's own defaults so the stage starts valid
-  // instead of reporting one problem per parameter per group.
+  // Changing the action or the workflow invalidates every binding and manual
+  // value, since they were keyed to the previous one's parameter ids. The
+  // replacement is seeded from the new one's own defaults so the stage starts
+  // valid instead of reporting one problem per parameter per group. Switching
+  // away from ComfyUI drops the workflow id, so it cannot resurface later.
   const handleUpdateStage = useCallback((stageId, patch) => {
     patchConfig(current => ({
       ...current,
       stages: current.stages.map((stage, stageIndex) => {
         if (stage.id !== stageId) return stage
+        const isActionChange = patch.action !== undefined
+          && normalizeBatchAction(patch.action) !== getStageAction(stage)
         const isWorkflowChange = patch.workflowId !== undefined && String(patch.workflowId) !== String(stage.workflowId)
-        if (!isWorkflowChange) {
+        if (!isActionChange && !isWorkflowChange) {
           return { ...stage, ...patch }
         }
-        const nextWorkflow = workflowsById[String(patch.workflowId)] || null
-        return {
+        const next = {
           ...stage,
           ...patch,
+          ...(isActionChange ? { action: normalizeBatchAction(patch.action), workflowId: '' } : {})
+        }
+        const nextWorkflow = getStageWorkflow(next, workflowsById)
+        return {
+          ...next,
           inputs: createStageDefaultInputs(nextWorkflow),
           bindings: createStageDefaultBindings(nextWorkflow, current.stages, stageIndex, current.variables)
         }
@@ -530,6 +596,18 @@ export default function BatchPage({ project }) {
     if (path) navigate(path)
   }, [navigate, project.id])
 
+  // Meshes go through the export settings; images and anything else a stage
+  // produced are copied as they are.
+  const handleExportResults = useCallback((results) => {
+    setExportItems(results.map(asset => ({
+      key: `${asset.type}:${asset.filePath || asset.filename}`,
+      name: asset.name || asset.filename,
+      url: getAssetPreviewUrl(asset.filename),
+      filename: asset.filename,
+      kind: asset.type === 'mesh' ? 'mesh' : 'file'
+    })))
+  }, [])
+
   const handleRequestDeleteResult = useCallback((target) => {
     setDeleteError('')
     setDeleteTarget({
@@ -580,7 +658,7 @@ export default function BatchPage({ project }) {
         })
       }
 
-      clearCells(cellKeys)
+      await clearCells(cellKeys)
       setDeleteTarget(null)
     } catch (err) {
       console.error('Failed to delete the batch result:', err)
@@ -668,6 +746,43 @@ export default function BatchPage({ project }) {
     && Boolean(resumeRunId)
     && progress.done > 0
     && progress.outstanding > 0
+  const runBlocked = loading || !runStateSynced || startingRun || problems.length > 0
+
+  // "continue" keeps every cell that already has a result; "restart" runs the
+  // whole grid again. The backend decides what is done from the result cards.
+  const handleStartBatch = async (mode) => {
+    setRunError('')
+    setStartingRun(true)
+    try {
+      // The desktop app starts its Python services on demand, and only the page
+      // can ask it to — the backend running the batch cannot. So every service a
+      // built-in stage needs is brought up before the run is handed over, rather
+      // than letting each of those cells fail on a connection refused.
+      const services = new Set(normalized.stages
+        .map(stage => getBatchActionDescriptor(getStageAction(stage))?.desktopService)
+        .filter(Boolean))
+      for (const service of services) {
+        await ensureDesktopService(service)
+      }
+      await startBatch({ config, mode })
+    } catch (err) {
+      console.error('Failed to start the batch:', err)
+      setRunError(err?.message || 'Failed to start the batch')
+    } finally {
+      setStartingRun(false)
+    }
+  }
+
+  const handleCancelBatch = async () => {
+    try {
+      await cancelBatch()
+    } catch (err) {
+      console.error('Failed to stop the batch:', err)
+      setRunError(err?.message || 'Failed to stop the batch')
+    }
+  }
+
+  const runProblem = runError || (runState.status === 'error' ? `The batch stopped: ${runState.error || 'unknown error'}` : '')
 
   return (
     <div className="batch-page">
@@ -679,6 +794,13 @@ export default function BatchPage({ project }) {
       />
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {/* An image-only stage has no settings to choose, only a folder. */}
+      {exportItems && (exportItems.some(item => item.kind === 'mesh') ? (
+        <ExportMeshDialog items={exportItems} onClose={() => setExportItems(null)} />
+      ) : (
+        <ExportFilesFlow items={exportItems} onClose={() => setExportItems(null)} />
+      ))}
 
       {assetPicker && (
         <AssetSelectorModal
@@ -869,7 +991,13 @@ export default function BatchPage({ project }) {
           </button>
 
           {isRunning ? (
-            <button type="button" className="batch-btn batch-btn--danger" onClick={cancelBatch}>
+            <button
+              type="button"
+              className="batch-btn batch-btn--danger"
+              onClick={handleCancelBatch}
+              disabled={runState.status === 'cancelling'}
+              title="The batch runs in the backend on this computer: closing or reloading this tab does not stop it. Stop lets the generation in progress finish."
+            >
               <span className="material-symbols-outlined">stop</span>
               {runState.status === 'cancelling' ? 'Stopping after this run…' : 'Stop'}
             </button>
@@ -879,13 +1007,8 @@ export default function BatchPage({ project }) {
                 <button
                   type="button"
                   className="batch-btn batch-btn--primary"
-                  onClick={() => startBatch({
-                    project,
-                    workflowsById,
-                    config,
-                    resumeFrom: { runId: resumeRunId, cells: displayCells }
-                  })}
-                  disabled={loading || problems.length > 0}
+                  onClick={() => handleStartBatch('continue')}
+                  disabled={runBlocked}
                   title={problems.length > 0
                     ? 'Resolve the problems listed below first'
                     : `Pick up where the run stopped — ${progress.done} done, ${progress.outstanding} to go`}
@@ -897,8 +1020,8 @@ export default function BatchPage({ project }) {
               <button
                 type="button"
                 className={`batch-btn ${canContinue ? '' : 'batch-btn--primary'}`}
-                onClick={() => startBatch({ project, workflowsById, config })}
-                disabled={loading || problems.length > 0 || plannedRuns === 0}
+                onClick={() => handleStartBatch('restart')}
+                disabled={runBlocked || plannedRuns === 0}
                 title={problems.length > 0
                   ? 'Resolve the problems listed below first'
                   : `${canContinue ? 'Start over: run' : 'Run'} every group through every stage, ${orderDescription}`}
@@ -921,6 +1044,20 @@ export default function BatchPage({ project }) {
           >
             <span className="material-symbols-outlined">error</span>
             <span className="batch-page__problems-title font-label">{assetError}</span>
+          </button>
+        </div>
+      )}
+
+      {runProblem && (
+        <div className="batch-page__problems batch-page__problems--error">
+          <button
+            type="button"
+            className="batch-page__problems-toggle"
+            onClick={() => setRunError('')}
+            title="Dismiss"
+          >
+            <span className="material-symbols-outlined">error</span>
+            <span className="batch-page__problems-title font-label">{runProblem}</span>
           </button>
         </div>
       )}
@@ -980,7 +1117,7 @@ export default function BatchPage({ project }) {
                 variables={normalized.variables}
                 groups={normalized.groups}
                 workflows={stageWorkflows}
-                workflow={workflowsById[String(stage.workflowId)] || null}
+                workflow={getStageWorkflow(stage, workflowsById)}
                 locked={isRunning}
                 onUpdateStage={handleUpdateStage}
                 onSetBinding={handleSetBinding}
@@ -1014,6 +1151,7 @@ export default function BatchPage({ project }) {
             locked={isRunning}
             onOpenAsset={handleOpenAsset}
             onDeleteResult={handleRequestDeleteResult}
+            onExport={handleExportResults}
           />
         )}
       </main>

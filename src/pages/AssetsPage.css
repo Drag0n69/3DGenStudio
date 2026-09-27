@@ -661,6 +661,143 @@
   box-shadow: 0 14px 28px rgba(0, 0, 0, 0.22);
 }
 
+/* Batch export selection. The checkbox sits over the preview's top-right
+   corner, which none of the preview's own badges use. */
+.asset-card {
+  position: relative;
+}
+
+.asset-card--selected,
+.asset-card--selected:hover {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.asset-card__select {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  background: rgba(13, 14, 16, 0.72);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity var(--transition-base);
+}
+
+.asset-card:hover .asset-card__select,
+.asset-card--selected .asset-card__select {
+  opacity: 1;
+}
+
+.asset-card__select input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.asset-card__child-badge {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 2;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-full);
+  background: var(--secondary);
+  color: var(--on-secondary, #0d0e10);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+}
+
+.asset-card__parent {
+  margin-top: -0.5rem;
+  font-size: 0.72rem;
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assets-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: var(--radius-lg);
+  background: var(--surface-container-low);
+  border: 1px solid rgba(71, 72, 74, 0.25);
+  font-size: 0.82rem;
+  color: var(--on-surface-variant);
+}
+
+.assets-selection-bar__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--on-surface);
+  cursor: pointer;
+}
+
+.assets-selection-bar__check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.assets-selection-bar__link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.assets-selection-bar__link:hover {
+  text-decoration: underline;
+}
+
+.assets-selection-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+
+.assets-selection-bar__export {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.9rem;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity var(--transition-base);
+}
+
+.assets-selection-bar__export .material-symbols-outlined {
+  font-size: 1.1rem;
+}
+
+.assets-selection-bar__export:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .asset-card__preview {
   width: 100%;
   background: var(--surface-container-high);

@@ -31,6 +31,8 @@ import {
   validateStylePack,
 } from './building/stylepack.js';
 import { mountMcp } from './mcp/http.js';
+import { createApiClient } from './mcp/client.js';
+import { createBatchRunner, mountBatchRuns } from './batch/runner.js';
 import { mountLogs } from './logs.js';
 import { moveGlbPivot, PIVOT_MODES } from './meshPivot.js';
 import { previewResponseBody, renderVfxFrames } from './vfxPreview.js';
@@ -359,6 +361,10 @@ const comfyProgressSnapshots = new Map();
 // receives progress for every promptId. This keeps a handful of concurrent
 // workflows from exhausting the browser's ~6 connection-per-origin cap.
 const comfyProgressGlobalSubscribers = new Set();
+// In-process listeners, keyed by promptId: the backend's own batch runner waits
+// on these instead of on a loopback SSE socket, so a cell that runs for hours
+// never depends on a connection staying up.
+const comfyProgressInProcessListeners = new Map();
 // In-flight ComfyUI runs, keyed by promptId, so a cancel request can reach the
 // execution monitor that is waiting on them. A run stays registered from the
 // moment its monitor is created until it settles (success, failure or cancel).
@@ -647,13 +653,23 @@ async function commitStagedUpload(file, assetType) {
 
 app.delete('/api/assets/library/edits', async (req, res) => {
   try {
-    const { filePath } = req.query;
+    const { filePath, force } = req.query;
 
     if (!filePath) {
       return res.status(400).json({ error: 'filePath is required' });
     }
 
-    const result = await deleteAssetEditByFilePath(String(filePath));
+    const result = await deleteAssetEditByFilePath(String(filePath), {
+      force: String(force || '').toLowerCase() === 'true'
+    });
+
+    if (result.status === 'linked') {
+      return res.status(409).json({
+        error: 'Edit is linked to a project',
+        projectId: result.projectId,
+        projectName: result.projectName || null
+      });
+    }
 
     if (result.status === 'not-found') {
       return res.status(404).json({ error: 'Edit not found' });
@@ -2079,6 +2095,14 @@ function publishComfyProgress(promptId, payload) {
     response.write(serialized);
   }
 
+  for (const listener of [...(comfyProgressInProcessListeners.get(key) || [])]) {
+    try {
+      listener(message);
+    } catch (err) {
+      console.warn(`A ComfyUI progress listener for ${key} failed:`, err?.message || err);
+    }
+  }
+
   if (message.status === 'completed' || message.status === 'error' || message.status === 'cancelled') {
     setTimeout(() => {
       if ((comfyProgressSubscribers.get(key)?.size || 0) === 0) {
@@ -2235,6 +2259,40 @@ async function cancelComfyRun(promptId) {
   return { ...outcome, tracked: true, settledByMonitor };
 }
 
+// Same frames as the SSE routes, delivered to a function in this process.
+// Replays the latest snapshot so a subscriber that is late still sees the end.
+function subscribeToComfyProgressInProcess(promptId, onData) {
+  const key = String(promptId || '');
+  if (!comfyProgressInProcessListeners.has(key)) {
+    comfyProgressInProcessListeners.set(key, new Set());
+  }
+  comfyProgressInProcessListeners.get(key).add(onData);
+
+  const snapshot = comfyProgressSnapshots.get(key);
+  if (snapshot) {
+    queueMicrotask(() => onData(snapshot));
+  }
+
+  return {
+    close: () => {
+      const listeners = comfyProgressInProcessListeners.get(key);
+      if (!listeners) return;
+      listeners.delete(onData);
+      if (listeners.size === 0) comfyProgressInProcessListeners.delete(key);
+    }
+  };
+}
+
+// Batch runs ride the multiplexed progress stream rather than /api/events:
+// that bus is forwarded to the shared server in gateway mode, while a batch run
+// - like ComfyUI itself - only ever exists on this computer.
+function publishBatchRun(run) {
+  const serialized = `data: ${JSON.stringify({ type: 'batchRun', timestamp: Date.now(), run })}\n\n`;
+  for (const response of comfyProgressGlobalSubscribers) {
+    response.write(serialized);
+  }
+}
+
 function subscribeToAllComfyProgress(req, res) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -2250,6 +2308,10 @@ function subscribeToAllComfyProgress(req, res) {
   for (const snapshot of comfyProgressSnapshots.values()) {
     res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
   }
+  // Every batch run, as the authoritative state: a page that was asleep,
+  // reloaded, or reconnected after a backend restart replaces whatever it
+  // remembered with this.
+  res.write(`data: ${JSON.stringify({ type: 'batchRuns', timestamp: Date.now(), runs: batchRunner.list() })}\n\n`);
 
   const heartbeat = setInterval(() => {
     res.write(': keep-alive\n\n');
@@ -4800,6 +4862,15 @@ app.get('/api/comfyui/workflows/events', (req, res) => {
   subscribeToAllComfyProgress(req, res);
 });
 
+// Batch runs (batch/runner.js): the loop runs here, not in the browser tab, so a
+// days-long batch keeps going while the tab is asleep, reloaded or closed.
+const batchRunner = createBatchRunner({
+  api: createApiClient(`http://127.0.0.1:${PORT}`),
+  subscribeProgress: subscribeToComfyProgressInProcess,
+  publish: publishBatchRun
+});
+mountBatchRuns(app, batchRunner);
+
 // Cancel a running (or still queued) ComfyUI workflow. The stop takes effect at
 // the next node/step boundary on the ComfyUI side; the run is settled here right
 // away so the client stops waiting either way.
@@ -6593,7 +6664,8 @@ app.delete('/api/projects/:id', async (req, res) => {
     const deleteAssets = req.query.deleteAssets === 'true';
     await deleteProjectById(Number(req.params.id), { deleteAssets });
     res.status(204).end();
-  } catch {
+  } catch (err) {
+    console.error('Failed to delete project:', err);
     res.status(500).json({ error: 'Deletion failed' });
   }
 });
@@ -8889,6 +8961,17 @@ app.post('/api/meshes/bake',
     }
   });
 
+// Lit-albedo flatten for mobile export: one mesh (carrying its packed atlas as a
+// second UV set) in, one baked albedo PNG out — same SSE contract as /bake.
+app.post('/api/meshes/flatten', meshToolsUpload.single('meshFile'), async (req, res) => {
+  try {
+    await proxyMeshTool('/meshes/flatten', req, res, { failureLabel: 'Flatten' });
+  } catch (err) {
+    console.error('Flatten proxy failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Flatten failed' });
+  }
+});
+
 // Assembly fit: adapt a garment/armour piece so it follows a base body's
 // silhouette. Two meshes, like /bake — `meshFile` is the PIECE being modified
 // and `sourceFile` is the base body.
@@ -9746,6 +9829,37 @@ function glbHasUvs(buffer) {
   }
 }
 
+// Triangles in a GLB, read from the JSON chunk alone (accessor counts, so no
+// buffer decoding and no dependency on how the geometry is compressed). Counts
+// each mesh once per node that instances it, which is also what gltfpack
+// reports as its input. Null when the file cannot be read or holds no
+// triangles, so a caller falls back to a plain ratio.
+function countGlbTriangles(buffer) {
+  try {
+    if (buffer.length < 20 || buffer.readUInt32LE(0) !== 0x46546c67) return null; // 'glTF'
+    const jsonLength = buffer.readUInt32LE(12);
+    const json = JSON.parse(buffer.subarray(20, 20 + jsonLength).toString('utf8'));
+    const accessors = json.accessors || [];
+    const trianglesInMesh = mesh => (mesh?.primitives || []).reduce((sum, primitive) => {
+      const mode = primitive.mode ?? 4;
+      const count = primitive.indices !== undefined
+        ? accessors[primitive.indices]?.count
+        : accessors[primitive.attributes?.POSITION]?.count;
+      if (!count) return sum;
+      if (mode === 4) return sum + Math.floor(count / 3);        // TRIANGLES
+      if (mode === 5 || mode === 6) return sum + Math.max(0, count - 2); // STRIP / FAN
+      return sum;
+    }, 0);
+    const instanced = (json.nodes || []).filter(node => node.mesh !== undefined);
+    const total = instanced.length
+      ? instanced.reduce((sum, node) => sum + trianglesInMesh(json.meshes?.[node.mesh]), 0)
+      : (json.meshes || []).reduce((sum, mesh) => sum + trianglesInMesh(mesh), 0);
+    return total > 0 ? total : null;
+  } catch {
+    return null;
+  }
+}
+
 // Simplify a GLB to `ratio` of its triangle count.
 //
 // Two different things stop a mesh short of its target, and they were previously
@@ -9868,7 +9982,16 @@ app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req,
     if (typeof req.body?.options === 'string' && req.body.options.length) {
       try { options = JSON.parse(req.body.options); } catch { options = {}; }
     }
-    const ratio = clampSimplifyRatio(options.simplify_ratio);
+    // A face budget instead of a ratio — what a Batch stage (and an MCP caller)
+    // asks for, because a ratio means something different on every mesh in the
+    // batch. gltfpack only takes a ratio, so the budget is turned into one
+    // against the input's own count. A mesh already inside the budget gets
+    // ratio 1, which simplifies nothing.
+    const targetFaces = Math.round(Number(options.target_faces));
+    const inputFaces = Number.isFinite(targetFaces) && targetFaces > 0 ? countGlbTriangles(meshFile.buffer) : null;
+    const ratio = inputFaces
+      ? clampSimplifyRatio(targetFaces / inputFaces)
+      : clampSimplifyRatio(options.simplify_ratio);
     const simplify = readSimplifyOptions(options);
 
     const result = await runGltfpack(meshFile.buffer, ratio, simplify);
@@ -9876,6 +9999,7 @@ app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req,
     res.json({
       mesh_b64: result.buffer.toString('base64'),
       stats: {
+        ...(inputFaces ? { target_faces: targetFaces } : {}),
         simplify_ratio: ratio,
         simplify_error: simplify.simplifyError,
         triangles: result.triangles,
@@ -10244,7 +10368,7 @@ app.delete('/api/assets/:id', async (req, res) => {
     }
 
     if (result.status === 'linked') {
-      return res.status(409).json({ error: 'Cannot delete an asset while it is linked to a card' });
+      return res.status(409).json({ error: 'Cannot delete an asset while it, or one of its edits/versions, is linked to a project or card' });
     }
 
     res.status(204).end();
